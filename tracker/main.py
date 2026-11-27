@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""[시험용] 장 초반 주가 추적 — 시험이 끝나면 정규 main.py로 되돌릴 것
+"""장 초반 주가 추적 (GitHub Actions)
 - 08:30 KST 시작 → 노션 아침 리포트에서 '오늘의 섹터' 종목 확보
 - 09:03 한국경제TV 해외고수기법·매수유망패턴 포착 종목 1회 수집(이후 추가 없음)
 - 09:05~10:10 5분 간격 KIS 시세 조회 → 텔레그램 발송
@@ -200,6 +200,29 @@ def sector_stocks(master):
 
 
 # ---------------- 한국경제TV 포착 종목 (09:03 1회) ----------------
+ROWS_JS = "rs => rs.map(r => Array.from(r.cells).map(c => c.innerText.trim()))"
+
+
+def read_rows_stable(pg, prev_rows, timeout_s=15):
+    """탭·조건을 누른 뒤 표가 다 바뀔 때까지 기다렸다 읽는다.
+    - 네트워크가 잠잠해진 뒤, 1.5초 간격으로 두 번 읽어 같으면 확정
+    - 직전 탭과 똑같은 목록이면 아직 안 바뀐 것으로 보고 더 기다린다(끝까지 같으면 빈 목록 처리)"""
+    try:
+        pg.wait_for_load_state("networkidle", timeout=10000)
+    except Exception:
+        pass
+    deadline, last = time.time() + timeout_s, None
+    while time.time() < deadline:
+        pg.wait_for_timeout(1500)
+        rows = pg.eval_on_selector_all("table tbody tr", ROWS_JS)
+        if rows == last and not (rows and rows == prev_rows):
+            return rows, True
+        last = rows
+    if last and last == prev_rows:
+        return [], False   # 직전 탭 목록이 그대로 → 갱신 실패로 보고 버림
+    return last or [], True
+
+
 def capture_wowtv(master):
     from playwright.sync_api import sync_playwright
     found, raw = [], {}
@@ -213,13 +236,14 @@ def capture_wowtv(master):
             except Exception as e:
                 err(f"{page_name} 열기 실패: {e}")
                 continue
+            prev = None
             for tab in tabs:
                 try:
                     pg.get_by_text(tab, exact=True).first.click(timeout=8000)
-                    pg.wait_for_timeout(3000)
                 except Exception as e:
                     err(f"{page_name}/{tab} 탭 실패: {e}")
                     continue
+                rows0, _ = read_rows_stable(pg, prev)   # 탭 화면이 다 바뀐 뒤 조건 버튼을 찾는다
                 # 매수유망패턴처럼 탭 안에 세부 조건(라디오 버튼)이 있으면 조건마다 따로 읽는다
                 radios = [r for r in pg.query_selector_all("input[type=radio]")  # 숨겨진 커스텀 라디오도 포함(보이는 영역 안의 것만)
                           if r.evaluate("e => !!((e.closest('label,li,div') || e.parentElement).offsetParent)")]
@@ -227,17 +251,21 @@ def capture_wowtv(master):
                 for i, rd in enumerate(conds):
                     label = tab
                     try:
-                        if rd is not None:
+                        if rd is None:
+                            rows, ok = rows0, True
+                        else:
                             txt = rd.evaluate("e => (e.closest('label,li,div') || e.parentElement).innerText || ''")
                             label = f"{tab}/{(txt.strip().splitlines() or ['조건' + str(i + 1)])[0][:30]}"
                             rd.evaluate("e => { e.click(); e.dispatchEvent(new Event('change', {bubbles: true})); }")  # 화면 밖 커스텀 라디오도 클릭
-                            pg.wait_for_timeout(3000)
-                        rows = pg.eval_on_selector_all(
-                            "table tbody tr", "rs => rs.map(r => Array.from(r.cells).map(c => c.innerText.trim()))")
+                            rows, ok = read_rows_stable(pg, prev)
+                        if not ok:
+                            LOG["notes"].append(f"{page_name}/{label}: 목록 갱신 안 됨(직전과 동일) → 제외")
                     except Exception as e:
                         err(f"{page_name}/{label} 읽기 실패: {e}")
                         rows = []
                     raw[f"{page_name}/{label}"] = rows
+                    if rows:
+                        prev = rows
                     for cells in rows:
                         code = next((re.search(r"\b(\d{6})\b", c).group(1) for c in cells if re.search(r"\b\d{6}\b", c)), None)
                         name = next((c for c in cells if c and re.search(r"[가-힣A-Za-z]", c) and len(c) <= 20), None)
@@ -347,6 +375,10 @@ def main():
             state["captured"].append(c)
     for s in state["sector"] + state["captured"]:
         s["name"] = s.get("name") or names.get(s["code"], s["code"])
+    allx = state["sector"] + state["captured"]
+    for s in allx:  # 이름이 같은 종목(예: 비슷한 ETF)은 코드로 구분
+        if sum(1 for x in allx if x["name"] == s["name"]) > 1:
+            s["name"] = f"{s['name']}({s['code']})"
     save(state)
 
     t = now().replace(hour=TICK_START[0], minute=TICK_START[1], second=0, microsecond=0)
