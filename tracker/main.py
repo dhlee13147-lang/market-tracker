@@ -112,6 +112,42 @@ def block_text(b):
     return txt
 
 
+def notion_post(path, token, body):
+    r = requests.post("https://api.notion.com/v1/" + path, json=body, timeout=30,
+                      headers={"Authorization": f"Bearer {token}", "Notion-Version": "2022-06-28"})
+    r.raise_for_status()
+    return r.json()
+
+
+def page_title(p):
+    for v in p.get("properties", {}).values():
+        if v.get("type") == "title":
+            return "".join(x.get("plain_text", "") for x in v["title"]).strip()
+    return ""
+
+
+def find_today_page(title, token):
+    """1) 장전 리포트 하위 목록에서 찾기 2) 실패하면 검색 API로 찾기 3) 그래도 없으면 진단 정보 기록"""
+    try:
+        for b in block_children(NOTION_PARENT, token):
+            if b["type"] == "child_page" and b["child_page"]["title"].strip() == title:
+                return b["id"]
+    except Exception as e:
+        err(f"노션 상위 페이지 읽기 실패: {e}")
+    try:
+        res = notion_post("search", token, {"query": title, "filter": {"value": "page", "property": "object"}})
+        for p in res.get("results", []):
+            if page_title(p) == title:
+                return p["id"]
+        me = notion_get("users/me", token)
+        seen = notion_post("search", token, {"page_size": 10, "filter": {"value": "page", "property": "object"}})
+        LOG["notes"].append("노션 진단: 통합 워크스페이스=" + str(me.get("bot", {}).get("workspace_name"))
+                            + " / 접근 가능한 페이지 예시=" + ", ".join(page_title(p) for p in seen.get("results", []))[:200])
+    except Exception as e:
+        err(f"노션 검색 실패: {e}")
+    return None
+
+
 def sector_stocks(master):
     token = os.environ.get("NOTION_TOKEN")
     if not token:
@@ -120,12 +156,11 @@ def sector_stocks(master):
     d = now()
     title = f"{d:%Y.%m.%d}({WEEKDAY_KO[d.weekday()]}) 장전 리포트"
     try:
-        page = next((b for b in block_children(NOTION_PARENT, token)
-                     if b["type"] == "child_page" and b["child_page"]["title"].strip() == title), None)
-        if not page:
-            LOG["notes"].append(f"오늘 리포트 없음({title})")
+        page_id = find_today_page(title, token)
+        if not page_id:
+            LOG["notes"].append(f"오늘 리포트 없음 또는 접근 불가({title})")
             return []
-        lines, stack = [], [page["id"]]
+        lines, stack = [], [page_id]
         while stack:  # 하위 블록까지 펼쳐 읽기(콜아웃·토글 포함)
             for b in block_children(stack.pop(0), token):
                 lines.append((b["type"], block_text(b)))
@@ -179,18 +214,33 @@ def capture_wowtv(master):
                 try:
                     pg.get_by_text(tab, exact=True).first.click(timeout=8000)
                     pg.wait_for_timeout(3000)
-                    rows = pg.eval_on_selector_all(
-                        "table tbody tr", "rs => rs.map(r => Array.from(r.cells).map(c => c.innerText.trim()))")
                 except Exception as e:
                     err(f"{page_name}/{tab} 탭 실패: {e}")
-                    rows = []
-                raw[f"{page_name}/{tab}"] = rows
-                for cells in rows:
-                    code = next((re.search(r"\b(\d{6})\b", c).group(1) for c in cells if re.search(r"\b\d{6}\b", c)), None)
-                    name = next((c for c in cells if c and re.search(r"[가-힣A-Za-z]", c) and len(c) <= 20), None)
-                    code = code or (to_code(name, master) if name else None)
-                    if code:
-                        found.append({"code": code, "name": name, "src": tab})
+                    continue
+                # 매수유망패턴처럼 탭 안에 세부 조건(라디오 버튼)이 있으면 조건마다 따로 읽는다
+                radios = [r for r in pg.query_selector_all("input[type=radio]")  # 숨겨진 커스텀 라디오도 포함(보이는 영역 안의 것만)
+                          if r.evaluate("e => !!((e.closest('label,li,div') || e.parentElement).offsetParent)")]
+                conds = radios if radios else [None]
+                for i, rd in enumerate(conds):
+                    label = tab
+                    try:
+                        if rd is not None:
+                            txt = rd.evaluate("e => (e.closest('label,li,div') || e.parentElement).innerText || ''")
+                            label = f"{tab}/{(txt.strip().splitlines() or ['조건' + str(i + 1)])[0][:30]}"
+                            rd.check(force=True, timeout=5000)
+                            pg.wait_for_timeout(3000)
+                        rows = pg.eval_on_selector_all(
+                            "table tbody tr", "rs => rs.map(r => Array.from(r.cells).map(c => c.innerText.trim()))")
+                    except Exception as e:
+                        err(f"{page_name}/{label} 읽기 실패: {e}")
+                        rows = []
+                    raw[f"{page_name}/{label}"] = rows
+                    for cells in rows:
+                        code = next((re.search(r"\b(\d{6})\b", c).group(1) for c in cells if re.search(r"\b\d{6}\b", c)), None)
+                        name = next((c for c in cells if c and re.search(r"[가-힣A-Za-z]", c) and len(c) <= 20), None)
+                        code = code or (to_code(name, master) if name else None)
+                        if code:
+                            found.append({"code": code, "name": name, "src": tab})
             safe = re.sub(r"\W", "_", page_name)
             pg.screenshot(path=os.path.join(ROOT, "results", "debug", f"{now():%Y%m%d}_{safe}.png"), full_page=True)
         br.close()
@@ -201,6 +251,8 @@ def capture_wowtv(master):
         by_tab.setdefault(f["src"], []).append(f)
     while len(picked) < MAX_CAPTURED and any(by_tab.values()):
         for t in list(by_tab):
+            if len(picked) >= MAX_CAPTURED:
+                break
             if by_tab[t]:
                 f = by_tab[t].pop(0)
                 if f["code"] not in seen:
@@ -296,11 +348,12 @@ def main():
 
     t = now().replace(hour=TICK_START[0], minute=TICK_START[1], second=0, microsecond=0)
     end = now().replace(hour=TICK_END[0], minute=TICK_END[1], second=0, microsecond=0)
+    step = INTERVAL_MIN
     first = True
     while t <= end:
         if (now() - t).total_seconds() > 120:  # 늦게 시작해 이미 지난 회차는 건너뜀
             LOG["notes"].append(f"{t:%H:%M} 회차 건너뜀(실행 지연)")
-            t += dt.timedelta(minutes=INTERVAL_MIN)
+            t += dt.timedelta(minutes=step)
             continue
         sleep_until(t.hour, t.minute)
         tick = {"time": f"{t:%H:%M}", "quotes": {}}
@@ -326,7 +379,7 @@ def main():
         state["telegram_ok" if ok else "telegram_fail"] += 1
         save(state)
         first = False
-        t += dt.timedelta(minutes=INTERVAL_MIN)
+        t += dt.timedelta(minutes=step)
     save(state)
     print("완료", json.dumps({k: state[k] for k in ("telegram_ok", "telegram_fail")}, ensure_ascii=False))
 
