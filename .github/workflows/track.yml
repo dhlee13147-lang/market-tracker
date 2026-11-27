@@ -1,8 +1,8 @@
 name: 장 초반 주가 추적
 
+# 실행은 구글 Apps Script가 평일 08:45 KST에 깃헙 API(workflow_dispatch)로 겁니다.
+# 깃헙 자체 예약(schedule)은 지연이 잦고, 같이 켜 두면 두 번 실행되므로 넣지 않습니다.
 on:
-  schedule:
-    - cron: "30 23 * * 0-4"   # 평일 08:30 KST (UTC 일~목 23:30). 깃헙 예약은 수 분~십수 분 늦을 수 있어 일찍 시작해 대기
   workflow_dispatch: {}
 
 permissions:
@@ -40,4 +40,5 @@ jobs:
           git config user.email "tracker-bot@users.noreply.github.com"
           git add results || true
           git diff --cached --quiet || git commit -m "results $(TZ=Asia/Seoul date +%Y%m%d)"
+          git pull --rebase || true
           git push || true
