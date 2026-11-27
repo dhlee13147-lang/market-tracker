@@ -27,11 +27,8 @@ WOWTV_PAGES = [
     ("매수유망패턴", "https://www.wowtv.co.kr/Finance/Trading/BuyingProspects?menuSeq=569",
      ["급등패턴", "상승초기형", "바닥탈출 후 상승패턴"]),
 ]
-# ===== 시험용 =====: 시작 즉시 포착 → 약 3분 뒤부터 2분 간격 3회 발송(장중 15:20 이전에 실행)
-_T0 = dt.datetime.now(dt.timezone(dt.timedelta(hours=9)))
-_T1 = (_T0 + dt.timedelta(minutes=3)).replace(second=0, microsecond=0)
-CAPTURE_AT = (_T0.hour, _T0.minute)
-TICK_START, TICK_END, INTERVAL_MIN = (_T1.hour, _T1.minute), ((_T1 + dt.timedelta(minutes=4)).hour, (_T1 + dt.timedelta(minutes=4)).minute), 2
+CAPTURE_AT = (9, 3)
+TICK_START, TICK_END, INTERVAL_MIN = (9, 5), (10, 10), 5
 MAX_SECTOR, MAX_CAPTURED = 8, 10
 HOLIDAYS = {
     "2026-12-25", "2026-12-31",
@@ -340,7 +337,7 @@ def fmt(x):
 
 
 def save(state):
-    path = os.path.join(ROOT, "results", f"test_{now():%Y%m%d}.json")
+    path = os.path.join(ROOT, "results", f"{now():%Y%m%d}.json")
     os.makedirs(os.path.dirname(path), exist_ok=True)
     state.update({"errors": LOG["errors"], "notes": LOG["notes"], "wowtv_raw": LOG.get("wowtv_raw", {})})
     with open(path, "w", encoding="utf-8") as f:
@@ -399,7 +396,7 @@ def main():
                 err(f"{t:%H:%M} {s['name']} 시세 실패: {e}")
             time.sleep(0.15)
         state["ticks"].append(tick)
-        lines = [f"[시험 추적 {t:%H:%M}] 전일 대비 %"]
+        lines = [f"[추적 {t:%H:%M}] 전일 대비 %"]
         for label, group in (("섹터", state["sector"]), ("포착(09:03)", state["captured"])):
             if not group:
                 continue
