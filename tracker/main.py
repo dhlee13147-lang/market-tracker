@@ -227,7 +227,7 @@ def capture_wowtv(master):
                         if rd is not None:
                             txt = rd.evaluate("e => (e.closest('label,li,div') || e.parentElement).innerText || ''")
                             label = f"{tab}/{(txt.strip().splitlines() or ['조건' + str(i + 1)])[0][:30]}"
-                            rd.check(force=True, timeout=5000)
+                            rd.evaluate("e => { e.click(); e.dispatchEvent(new Event('change', {bubbles: true})); }")  # 화면 밖 커스텀 라디오도 클릭
                             pg.wait_for_timeout(3000)
                         rows = pg.eval_on_selector_all(
                             "table tbody tr", "rs => rs.map(r => Array.from(r.cells).map(c => c.innerText.trim()))")
